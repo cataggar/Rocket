@@ -21,7 +21,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rocket = "0.5.0-rc.1"
+//! rocket = "=0.5.0-rc.3"
 //! ```
 //!
 //! And to import all macros, attributes, and derives via `#[macro_use]` in the
@@ -388,14 +388,16 @@ pub fn async_test(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ```rust,no_run
 /// #[rocket::main]
 /// async fn main() -> Result<(), rocket::Error> {
-///     rocket::build()
+///     let _rocket = rocket::build()
 ///         .ignite().await?
-///         .launch().await
+///         .launch().await?;
+///
+///     Ok(())
 /// }
 /// ```
 ///
-/// It should be used only when inspection of an ignited instance of `Rocket` is
-/// required, or when the return value of `launch()` is to be inspected:
+/// It should be used only when the return values of `ignite()` or `launch()`
+/// are to be inspected:
 ///
 /// ```rust,no_run
 /// #[rocket::main]
@@ -403,10 +405,10 @@ pub fn async_test(args: TokenStream, input: TokenStream) -> TokenStream {
 ///     let rocket = rocket::build().ignite().await?;
 ///     println!("Hello, Rocket: {:?}", rocket);
 ///
-///     let result = rocket.launch().await;
-///     println!("The server shutdown: {:?}", result);
+///     let rocket = rocket.launch().await?;
+///     println!("Welcome back, Rocket: {:?}", rocket);
 ///
-///     result
+///     Ok(())
 /// }
 /// ```
 ///
@@ -1003,7 +1005,7 @@ pub fn derive_responder(input: TokenStream) -> TokenStream {
 /// used. In the example above, the field `MyStruct::kind` is rendered with a
 /// name of `type`.
 ///
-/// The attribute can slso be applied to variants of C-like enums; it may only
+/// The attribute can also be applied to variants of C-like enums; it may only
 /// contain `value` and looks as follows:
 ///
 /// ```rust
@@ -1059,9 +1061,9 @@ pub fn derive_uri_display_path(input: TokenStream) -> TokenStream {
     emit!(derive::uri_display::derive_uri_display_path(input))
 }
 
-/// Generates a [`Vec`] of [`Route`]s from a set of route paths.
+/// Generates a `Vec` of [`Route`]s from a set of route paths.
 ///
-/// The `routes!` macro expands a list of route paths into a [`Vec`] of their
+/// The `routes!` macro expands a list of route paths into a `Vec` of their
 /// corresponding [`Route`] structures. For example, given the following routes:
 ///
 /// ```rust
@@ -1115,9 +1117,9 @@ pub fn routes(input: TokenStream) -> TokenStream {
     emit!(bang::routes_macro(input))
 }
 
-/// Generates a [`Vec`] of [`Catcher`]s from a set of catcher paths.
+/// Generates a `Vec` of [`Catcher`]s from a set of catcher paths.
 ///
-/// The `catchers!` macro expands a list of catcher paths into a [`Vec`] of
+/// The `catchers!` macro expands a list of catcher paths into a `Vec` of
 /// their corresponding [`Catcher`] structures. For example, given the following
 /// catchers:
 ///
@@ -1228,7 +1230,7 @@ pub fn catchers(input: TokenStream) -> TokenStream {
 /// A URI to a route name `foo` is generated using `uri!(foo(v1, v2, v3))` or
 /// `uri!(foo(a = v1, b = v2, c = v3))`, where `v1`, `v2`, `v3` are the values
 /// to fill in for route parameters named `a`, `b`, and `c`. If the named
-/// parameter sytnax is used (`a = v1`, etc.), parameters can appear in any
+/// parameter syntax is used (`a = v1`, etc.), parameters can appear in any
 /// order.
 ///
 /// More concretely, for the route `person` defined below:
@@ -1455,6 +1457,7 @@ pub fn catchers(input: TokenStream) -> TokenStream {
 /// are not ignorable.
 ///
 /// [`Uri`]: ../rocket/http/uri/enum.Uri.html
+/// [`Uri::parse_any()`]: ../rocket/http/uri/enum.Uri.html#method.parse_any
 /// [`Origin`]: ../rocket/http/uri/struct.Origin.html
 /// [`Asterisk`]: ../rocket/http/uri/struct.Asterisk.html
 /// [`Authority`]: ../rocket/http/uri/struct.Authority.html

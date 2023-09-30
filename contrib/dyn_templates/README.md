@@ -22,7 +22,7 @@ supports [Handlebars] and [Tera].
 
      ```toml
      [dependencies.rocket_dyn_templates]
-     version = "0.1.0-rc.1"
+     version = "=0.1.0-rc.3"
      features = ["handlebars", "tera"]
      ```
 
@@ -35,16 +35,16 @@ supports [Handlebars] and [Tera].
      last two extensions**:
 
      ```rust
-     use rocket_dyn_templates::Template;
+     use rocket_dyn_templates::{Template, context};
+
+     #[get("/")]
+     fn index() -> Template {
+         Template::render("template-name", context! { field: "value" })
+     }
 
      #[launch]
      fn rocket() -> _ {
          rocket::build().attach(Template::fairing())
-     }
-
-     #[get("/")]
-     fn index() -> Template {
-         Template::render("template-name", &context)
      }
      ```
 

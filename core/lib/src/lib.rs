@@ -29,7 +29,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rocket = "0.5.0-rc.1"
+//! rocket = "=0.5.0-rc.3"
 //! ```
 //!
 //! <small>Note that development versions, tagged with `-dev`, are not published
@@ -56,23 +56,31 @@
 //!
 //! ## Features
 //!
-//! To avoid compiling unused dependencies, Rocket gates certain features, all
-//! of which are disabled by default:
+//! To avoid compiling unused dependencies, Rocket gates certain features. With
+//! the exception of `http2`, all are disabled by default:
 //!
 //! | Feature   | Description                                             |
 //! |-----------|---------------------------------------------------------|
 //! | `secrets` | Support for authenticated, encrypted [private cookies]. |
 //! | `tls`     | Support for [TLS] encrypted connections.                |
 //! | `mtls`    | Support for verified clients via [mutual TLS].          |
+//! | `http2`   | Support for HTTP/2 (enabled by default).                |
 //! | `json`    | Support for [JSON (de)serialization].                   |
 //! | `msgpack` | Support for [MessagePack (de)serialization].            |
 //! | `uuid`    | Support for [UUID value parsing and (de)serialization]. |
 //!
-//! Features can be selectively enabled in `Cargo.toml`:
+//! Disabled features can be selectively enabled in `Cargo.toml`:
 //!
 //! ```toml
 //! [dependencies]
-//! rocket = { version = "0.5.0-rc.1", features = ["secrets", "tls", "json"] }
+//! rocket = { version = "=0.5.0-rc.3", features = ["secrets", "tls", "json"] }
+//! ```
+//!
+//! Conversely, HTTP/2 can be disabled:
+//!
+//! ```toml
+//! [dependencies]
+//! rocket = { version = "=0.5.0-rc.3", default-features = false }
 //! ```
 //!
 //! [JSON (de)serialization]: crate::serde::json
@@ -136,6 +144,18 @@ pub mod http {
     #[doc(inline)]
     pub use rocket_http::*;
 
+    /// Re-exported hyper HTTP library types.
+    ///
+    /// All types that are re-exported from Hyper reside inside of this module.
+    /// These types will, with certainty, be removed with time, but they reside here
+    /// while necessary.
+    pub mod hyper {
+        #[doc(hidden)]
+        pub use rocket_http::hyper::*;
+
+        pub use rocket_http::hyper::header;
+    }
+
     #[doc(inline)]
     pub use crate::cookies::*;
 }
@@ -165,11 +185,11 @@ mod phase;
 #[doc(inline)] pub use phase::{Phase, Build, Ignite, Orbit};
 #[doc(inline)] pub use error::Error;
 #[doc(inline)] pub use sentinel::Sentinel;
+#[doc(inline)] pub use crate::request::Request;
+#[doc(inline)] pub use crate::rocket::Rocket;
+#[doc(inline)] pub use crate::shutdown::Shutdown;
+#[doc(inline)] pub use crate::state::State;
 #[doc(inline)] pub use rocket_codegen::*;
-pub use crate::rocket::Rocket;
-pub use crate::request::Request;
-pub use crate::shutdown::Shutdown;
-pub use crate::state::State;
 
 /// Creates a [`Rocket`] instance with the default config provider: aliases
 /// [`Rocket::build()`].
@@ -214,29 +234,129 @@ pub use async_trait::async_trait;
 
 /// WARNING: This is unstable! Do not use this method outside of Rocket!
 #[doc(hidden)]
-pub fn async_test<R>(fut: impl std::future::Future<Output = R>) -> R {
-    tokio::runtime::Builder::new_multi_thread()
-        // NOTE: graceful shutdown depends on the "rocket-worker" prefix.
-        .thread_name("rocket-worker-test-thread")
-        .worker_threads(1)
+pub fn async_run<F, R>(fut: F, workers: usize, sync: usize, force_end: bool, name: &str) -> R
+    where F: std::future::Future<Output = R>
+{
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name(name)
+        .worker_threads(workers)
+        .max_blocking_threads(sync)
         .enable_all()
         .build()
-        .expect("create tokio runtime")
-        .block_on(fut)
+        .expect("create tokio runtime");
+
+    let result = runtime.block_on(fut);
+    if force_end {
+        runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+    }
+
+    result
+}
+
+/// WARNING: This is unstable! Do not use this method outside of Rocket!
+#[doc(hidden)]
+pub fn async_test<R>(fut: impl std::future::Future<Output = R>) -> R {
+    async_run(fut, 1, 32, true, "rocket-worker-test-thread")
 }
 
 /// WARNING: This is unstable! Do not use this method outside of Rocket!
 #[doc(hidden)]
 pub fn async_main<R>(fut: impl std::future::Future<Output = R> + Send) -> R {
-    // FIXME: The `workers` value won't reflect swaps of `Rocket` in attach
-    // fairings with different config values, or values from non-Rocket configs.
-    // See tokio-rs/tokio#3329 for a necessary solution in `tokio`.
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(Config::from(Config::figment()).workers)
-        // NOTE: graceful shutdown depends on the "rocket-worker" prefix.
-        .thread_name("rocket-worker-thread")
-        .enable_all()
-        .build()
-        .expect("create tokio runtime")
-        .block_on(fut)
+    // FIXME: We need to run `fut` to get the user's `Figment` to properly set
+    // up the async env, but we need the async env to run `fut`. So we're stuck.
+    // Tokio doesn't let us take the state from one async env and migrate it to
+    // another, so we need to use one, making this impossible.
+    //
+    // So as a result, we only use values from Rocket's figment. These
+    // values won't reflect swaps of `Rocket` in attach fairings with different
+    // config values, or values from non-Rocket configs. See tokio-rs/tokio#3329
+    // for a necessary resolution in `tokio`.
+    use config::bail_with_config_error as bail;
+
+    let fig = Config::figment();
+    let workers = fig.extract_inner(Config::WORKERS).unwrap_or_else(bail);
+    let max_blocking = fig.extract_inner(Config::MAX_BLOCKING).unwrap_or_else(bail);
+    let force = fig.focus(Config::SHUTDOWN).extract_inner("force").unwrap_or_else(bail);
+    async_run(fut, workers, max_blocking, force, "rocket-worker-thread")
+}
+
+/// Executes a `future` to completion on a new tokio-based Rocket async runtime.
+///
+/// The runtime is terminated on shutdown, and the future's resolved value is
+/// returned.
+///
+/// # Considerations
+///
+/// This function is a low-level mechanism intended to be used to execute the
+/// future returned by [`Rocket::launch()`] in a self-contained async runtime
+/// designed for Rocket. It runs futures in exactly the same manner as
+/// [`#[launch]`](crate::launch) and [`#[main]`](crate::main) do and is thus
+/// _never_ the preferred mechanism for running a Rocket application. _Always_
+/// prefer to use the [`#[launch]`](crate::launch) or [`#[main]`](crate::main)
+/// attributes. For example [`#[main]`](crate::main) can be used even when
+/// Rocket is just a small part of a bigger application:
+///
+/// ```rust,no_run
+/// #[rocket::main]
+/// async fn main() {
+///     # let should_start_server_in_foreground = false;
+///     # let should_start_server_in_background = false;
+///     let rocket = rocket::build();
+///     if should_start_server_in_foreground {
+///         rocket::build().launch().await;
+///     } else if should_start_server_in_background {
+///         rocket::tokio::spawn(rocket.launch());
+///     } else {
+///         // do something else
+///     }
+/// }
+/// ```
+///
+/// See [Rocket#launching] for more on using these attributes.
+///
+/// # Example
+///
+/// Build an instance of Rocket, launch it, and wait for shutdown:
+///
+/// ```rust,no_run
+/// use rocket::fairing::AdHoc;
+///
+/// let rocket = rocket::build()
+///     .attach(AdHoc::on_liftoff("Liftoff Printer", |_| Box::pin(async move {
+///         println!("Stalling liftoff for a second...");
+///         rocket::tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+///         println!("And we're off!");
+///     })));
+///
+/// rocket::execute(rocket.launch());
+/// ```
+///
+/// Launch a pre-built instance of Rocket and wait for it to shutdown:
+///
+/// ```rust,no_run
+/// use rocket::{Rocket, Ignite, Phase, Error};
+///
+/// fn launch<P: Phase>(rocket: Rocket<P>) -> Result<Rocket<Ignite>, Error> {
+///     rocket::execute(rocket.launch())
+/// }
+/// ```
+///
+/// Do async work to build an instance of Rocket, launch, and wait for shutdown:
+///
+/// ```rust,no_run
+/// use rocket::fairing::AdHoc;
+///
+/// // This line can also be inside of the `async` block.
+/// let rocket = rocket::build();
+///
+/// rocket::execute(async move {
+///     let rocket = rocket.ignite().await?;
+///     let config = rocket.config();
+///     rocket.launch().await
+/// });
+/// ```
+pub fn execute<R, F>(future: F) -> R
+    where F: std::future::Future<Output = R> + Send
+{
+    async_main(future)
 }

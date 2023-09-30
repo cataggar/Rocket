@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/config.sh"
 # Add Cargo to PATH.
 export PATH=${HOME}/.cargo/bin:${PATH}
 export CARGO_INCREMENTAL=0
+export RUSTC_BOOTSTRAP=1
 CARGO="cargo"
 
 # Checks that the versions for Cargo projects $@ all match
@@ -33,7 +34,7 @@ function check_versions_match() {
 function check_style() {
   # Ensure there are no tabs in any file.
   local tab=$(printf '\t')
-  local matches=$(git grep -E -I -n "${tab}" "${PROJECT_ROOT}" | grep -v 'LICENSE')
+  local matches=$(git grep -PIn "${tab}" "${PROJECT_ROOT}" | grep -v 'LICENSE')
   if ! [ -z "${matches}" ]; then
     echo "Tab characters were found in the following:"
     echo "${matches}"
@@ -42,7 +43,7 @@ function check_style() {
 
   # Ensure non-comment lines are under 100 characters.
   local n=100
-  local matches=$(git grep -P -I -n "(?=^..{$n,}$)(?!^\s*\/\/[\/!].*$).*" '*.rs')
+  local matches=$(git grep -PIn "(?=^..{$n,}$)(?!^\s*\/\/[\/!].*$).*" '*.rs')
   if ! [ -z "${matches}" ]; then
     echo "Lines longer than $n characters were found in the following:"
     echo "${matches}"
@@ -50,7 +51,7 @@ function check_style() {
   fi
 
   # Ensure there's no trailing whitespace.
-  local matches=$(git grep -E -I -n "\s+$" "${PROJECT_ROOT}" | grep -v -F '.stderr:')
+  local matches=$(git grep -PIn "\s+$" "${PROJECT_ROOT}" | grep -v -F '.stderr:')
   if ! [ -z "${matches}" ]; then
     echo "Trailing whitespace was found in the following:"
     echo "${matches}"
@@ -79,8 +80,9 @@ function test_contrib() {
     sqlx_mysql
     sqlx_postgres
     sqlx_sqlite
-    sqlx_mssql
     mongodb
+    diesel_mysql
+    diesel_postgres
   )
 
   SYNC_DB_POOLS_FEATURES=(
@@ -97,6 +99,10 @@ function test_contrib() {
     handlebars
   )
 
+  WS_FEATURES=(
+    tungstenite
+  )
+
   for feature in "${DB_POOLS_FEATURES[@]}"; do
     echo ":: Building and testing db_pools [$feature]..."
     $CARGO test -p rocket_db_pools --no-default-features --features $feature $@
@@ -111,6 +117,11 @@ function test_contrib() {
     echo ":: Building and testing dyn_templates [$feature]..."
     $CARGO test -p rocket_dyn_templates --no-default-features --features $feature $@
   done
+
+  for feature in "${WS_FEATURES[@]}"; do
+    echo ":: Building and testing ws [$feature]..."
+    $CARGO test -p rocket_ws --no-default-features --features $feature $@
+  done
 }
 
 function test_core() {
@@ -118,6 +129,7 @@ function test_core() {
     secrets
     tls
     mtls
+    http2
     json
     msgpack
     uuid
@@ -143,7 +155,7 @@ function test_examples() {
   indir "${EXAMPLES_DIR}" $CARGO update
   ROCKET_SECRET_KEY="itlYmFR2vYKrOmFhupMIn/hyB6lYCCTXz4yaQX89XVg=" \
     indir "${EXAMPLES_DIR}" $CARGO test --all $@
-  }
+}
 
 function test_default() {
   echo ":: Building and testing core libraries..."
@@ -156,6 +168,11 @@ function test_default() {
   echo ":: Checking fuzzers..."
   indir "${FUZZ_ROOT}" $CARGO update
   indir "${FUZZ_ROOT}" $CARGO check --all --all-features $@
+}
+
+function test_ui() {
+  echo ":: Testing compile-time UI output..."
+  indir "${PROJECT_ROOT}" $CARGO test ui --all --all-features -- --ignored $@
 }
 
 function run_benchmarks() {
@@ -171,7 +188,7 @@ fi
 
 # The kind of test we'll be running.
 TEST_KIND="default"
-KINDS=("contrib" "benchmarks" "core" "examples" "default" "all")
+KINDS=("contrib" "benchmarks" "core" "examples" "default" "ui" "all")
 
 if [[ " ${KINDS[@]} " =~ " ${1#"--"} " ]]; then
   TEST_KIND=${1#"--"}
@@ -206,17 +223,20 @@ case $TEST_KIND in
   examples) test_examples $@ ;;
   default) test_default $@ ;;
   benchmarks) run_benchmarks $@ ;;
+  ui) test_ui $@ ;;
   all)
     test_default $@ & default=$!
     test_examples $@ & examples=$!
     test_core $@ & core=$!
     test_contrib $@ & contrib=$!
+    test_ui $@ & ui=$!
 
     failures=()
     if ! wait $default ; then failures+=("DEFAULT"); fi
     if ! wait $examples ; then failures+=("EXAMPLES"); fi
     if ! wait $core ; then failures+=("CORE"); fi
     if ! wait $contrib ; then failures+=("CONTRIB"); fi
+    if ! wait $ui ; then failures+=("UI"); fi
 
     if [ ${#failures[@]} -ne 0 ]; then
       tput setaf 1;

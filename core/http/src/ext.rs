@@ -1,7 +1,7 @@
 //! Extension traits implemented by several HTTP types.
 
 use smallvec::{Array, SmallVec};
-use state::Storage;
+use state::InitCell;
 
 // TODO: It would be nice if we could somehow have one trait that could give us
 // either SmallVec or Vec.
@@ -63,14 +63,14 @@ impl<T: Clone> IntoCollection<T> for &[T] {
 impl<T, const N: usize> IntoCollection<T> for [T; N] {
     #[inline(always)]
     fn into_collection<A: Array<Item=T>>(self) -> SmallVec<A> {
-        std::array::IntoIter::new(self).collect()
+        self.into_iter().collect()
     }
 
     #[inline]
     fn mapped<U, F, A: Array<Item=U>>(self, f: F) -> SmallVec<A>
         where F: FnMut(T) -> U
     {
-        std::array::IntoIter::new(self).map(f).collect()
+        self.into_iter().map(f).collect()
     }
 }
 
@@ -106,10 +106,10 @@ impl<T: IntoOwned> IntoOwned for Vec<T> {
     }
 }
 
-impl<T: IntoOwned + Send + Sync> IntoOwned for Storage<T>
+impl<T: IntoOwned + Send + Sync> IntoOwned for InitCell<T>
     where T::Owned: Send + Sync
 {
-    type Owned = Storage<T::Owned>;
+    type Owned = InitCell<T::Owned>;
 
     #[inline(always)]
     fn into_owned(self) -> Self::Owned {
@@ -125,7 +125,6 @@ impl<A: IntoOwned, B: IntoOwned> IntoOwned for (A, B) {
         (self.0.into_owned(), self.1.into_owned())
     }
 }
-
 
 impl<B: 'static + ToOwned + ?Sized> IntoOwned for Cow<'_, B> {
     type Owned = Cow<'static, B>;
@@ -149,6 +148,7 @@ macro_rules! impl_into_owned_self {
     )*)
 }
 
+impl_into_owned_self!(bool);
 impl_into_owned_self!(u8, u16, u32, u64, usize);
 impl_into_owned_self!(i8, i16, i32, i64, isize);
 

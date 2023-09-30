@@ -284,10 +284,21 @@ pub enum Hsts {
     /// Like [`Hsts::Enable`], but also apply to all of the site's subdomains.
     IncludeSubDomains(Duration),
 
+    /// Send a "preload" HSTS header, which requests inclusion in the HSTS
+    /// preload list. This variant implies [`Hsts::IncludeSubDomains`], which
+    /// implies [`Hsts::Enable`].
+    ///
+    /// The provided `Duration` must be _at least_ 365 days. If the duration
+    /// provided is less than 365 days, the header will be written out with a
+    /// `max-age` of 365 days.
+    ///
+    /// # Details
+    ///
     /// Google maintains an [HSTS preload service] that can be used to prevent
     /// the browser from ever connecting to your site over an insecure
     /// connection. Read more at [MDN]. Don't enable this before you have
-    /// registered your site.
+    /// registered your site and you ensure that it meets the requirements
+    /// specified by the preload service.
     ///
     /// [HSTS preload service]: https://hstspreload.org/
     /// [MDN]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security#Preloading_Strict_Transport_Security
@@ -317,7 +328,12 @@ impl From<&Hsts> for Header<'static> {
             Hsts::IncludeSubDomains(age) => {
                 format!("max-age={}; includeSubDomains", age.whole_seconds())
             }
-            Hsts::Preload(age) => format!("max-age={}; preload", age.whole_seconds()),
+            Hsts::Preload(age) => {
+                // Google says it needs to be >= 365 days for preload list.
+                static YEAR: Duration = Duration::seconds(31536000);
+
+                format!("max-age={}; includeSubDomains; preload", age.max(&YEAR).whole_seconds())
+            }
         };
 
         Header::new(Hsts::NAME, policy_string)
@@ -445,7 +461,7 @@ impl From<&Prefetch> for Header<'static> {
 /// control exactly _which_ (if any) origins may access or request access to
 /// browser features.
 ///
-/// Features are enabled via the [`Permission::allowed()`] contructor and
+/// Features are enabled via the [`Permission::allowed()`] constructor and
 /// chainable [`allow()`](Self::allow()) build method. Features can be blocked
 /// via the [`Permission::blocked()`] and chainable [`block()`](Self::block())
 /// builder method.
@@ -537,7 +553,7 @@ impl Permission {
     /// be a single [`Allow`], a slice (`[Allow]` or `&[Allow]`), or a vector
     /// (`Vec<Allow>`).
     ///
-    /// This policy supercedes any previous policy set for `feature`.
+    /// This policy supersedes any previous policy set for `feature`.
     ///
     /// If `allow` is empty, the use of the feature is blocked unless another
     /// call to `allow()` allows it. If `allow` contains [`Allow::Any`], the
@@ -581,7 +597,7 @@ impl Permission {
         self
     }
 
-    /// Blocks `feature`. This policy supercedes any previous policy set for
+    /// Blocks `feature`. This policy supersedes any previous policy set for
     /// `feature`.
     ///
     /// # Example

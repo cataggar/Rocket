@@ -3,9 +3,7 @@ use rocket::fairing::AdHoc;
 use rocket::response::{Debug, status::Created};
 use rocket::serde::{Serialize, Deserialize, json::Json};
 
-use rocket_sync_db_pools::diesel;
-
-use self::diesel::prelude::*;
+use diesel::prelude::*;
 
 #[database("diesel")]
 struct Db(diesel::SqliteConnection);
@@ -14,7 +12,7 @@ type Result<T, E = Debug<diesel::result::Error>> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Queryable, Insertable)]
 #[serde(crate = "rocket::serde")]
-#[table_name="posts"]
+#[diesel(table_name = posts)]
 struct Post {
     #[serde(skip_deserializing)]
     id: Option<i32>,
@@ -34,14 +32,16 @@ table! {
 }
 
 #[post("/", data = "<post>")]
-async fn create(db: Db, post: Json<Post>) -> Result<Created<Json<Post>>> {
+async fn create(db: Db, mut post: Json<Post>) -> Result<Created<Json<Post>>> {
     let post_value = post.clone();
-    db.run(move |conn| {
+    let id: Option<i32> = db.run(move |conn| {
         diesel::insert_into(posts::table)
             .values(&*post_value)
-            .execute(conn)
+            .returning(posts::id)
+            .get_result(conn)
     }).await?;
 
+    post.id = Some(id.expect("returning guarantees id present"));
     Ok(Created::new("/").body(post))
 }
 
@@ -84,13 +84,14 @@ async fn destroy(db: Db) -> Result<()> {
 }
 
 async fn run_migrations(rocket: Rocket<Build>) -> Rocket<Build> {
-    // This macro from `diesel_migrations` defines an `embedded_migrations`
-    // module containing a function named `run` that runs the migrations in the
-    // specified directory, initializing the database.
-    embed_migrations!("db/diesel/migrations");
+    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
-    let conn = Db::get_one(&rocket).await.expect("database connection");
-    conn.run(|c| embedded_migrations::run(c)).await.expect("diesel migrations");
+    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("db/diesel/migrations");
+
+    Db::get_one(&rocket).await
+        .expect("database connection")
+        .run(|conn| { conn.run_pending_migrations(MIGRATIONS).expect("diesel migrations"); })
+        .await;
 
     rocket
 }

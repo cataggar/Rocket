@@ -51,7 +51,7 @@ use smallvec::SmallVec;
 /// [`exact_eq()`](MediaType::exact_eq()) method can be used.
 #[derive(Debug, Clone)]
 pub struct MediaType {
-    /// Storage for the entire media type string.
+    /// InitCell for the entire media type string.
     pub(crate) source: Source,
     /// The top-level type.
     pub(crate) top: IndexedStr<'static>,
@@ -112,7 +112,7 @@ macro_rules! media_types {
         docify!([
             Returns @code{true} if the @[top-level] and sublevel types of
             @code{self} are the same as those of @{"`MediaType::"}! $name
-            @{"`"}!.
+            @{"`"}!, i.e @{"`"} @{$t}! @[/]! @{$s}! $(; @{$k}! @[=]! @{$v}!)* @{"`"}!.
         ];
             #[inline(always)]
             pub fn $check(&self) -> bool {
@@ -214,7 +214,7 @@ macro_rules! parse_flexible {
     ($($short:expr => $name:ident,)*) => (
     docify!([
         Flexibly parses @code{name} into a @code{MediaType}. The parse is
-        @[_flexible_] because, in addition to stricly correct media types, it
+        @[_flexible_] because, in addition to strictly correct media types, it
         recognizes the following shorthands:
 
         @nl
@@ -467,13 +467,15 @@ impl MediaType {
 
     /// Compares `self` with `other` and returns `true` if `self` and `other`
     /// are exactly equal to each other, including with respect to their
-    /// parameters.
+    /// parameters and their order.
     ///
     /// This is different from the `PartialEq` implementation in that it
-    /// considers parameters. If `PartialEq` returns false, this function is
-    /// guaranteed to return false. Similarly, if this function returns `true`,
-    /// `PartialEq` is guaranteed to return true. However, if `PartialEq`
-    /// returns `true`, this function may or may not return `true`.
+    /// considers parameters. In particular, `Eq` implies `PartialEq` but
+    /// `PartialEq` does not imply `Eq`. That is, if `PartialEq` returns false,
+    /// this function is guaranteed to return false. Similarly, if `exact_eq`
+    /// returns `true`, `PartialEq` is guaranteed to return true. However, if
+    /// `PartialEq` returns `true`, `exact_eq` function may or may not return
+    /// `true`.
     ///
     /// # Example
     ///
@@ -572,16 +574,13 @@ impl PartialEq for MediaType {
     }
 }
 
+impl Eq for MediaType {  }
+
 impl Hash for MediaType {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.top().hash(state);
         self.sub().hash(state);
-
-        for (key, val) in self.params() {
-            key.hash(state);
-            val.hash(state);
-        }
     }
 }
 

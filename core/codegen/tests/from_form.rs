@@ -410,6 +410,51 @@ fn form_errors() {
 }
 
 #[test]
+fn form_validate_error_return_correct_field_name() {
+    fn evaluate_other<'v>(_other: &str, _check: &bool) -> form::Result<'v, ()> {
+        Err(form::Error::validation(""))?
+    }
+
+    #[derive(Debug, PartialEq, FromForm)]
+    struct WhoopsForm {
+        name: String,
+        check: bool,
+        // in the error context this is returned as "name" but should be "other"
+        // the problem is dependent on an argument existing for evaluate_other
+        #[field(validate = evaluate_other(&self.check))]
+        other: String,
+    }
+
+    let errors = strict::<WhoopsForm>("name=test&check=true&other=").unwrap_err();
+    assert!(errors.iter().any(|e| e.name.as_ref().unwrap() == "other"));
+}
+
+#[test]
+fn form_validate_contains_all_errors() {
+    fn evaluate<'v>(_value: &str) -> form::Result<'v, ()> {
+        Err(form::Error::validation(""))?
+    }
+
+    fn evaluate_with_argument<'v>(_value: &str, _check: bool) -> form::Result<'v, ()> {
+        Err(form::Error::validation("lastname failed"))?
+    }
+
+    #[derive(Debug, PartialEq, FromForm)]
+    struct WhoopsForm {
+        #[field(validate = evaluate())]
+        firstname: String,
+        check: bool,
+        // this validator is hardcoded to return an error but it doesnt
+        #[field(validate = evaluate_with_argument(self.check))]
+        lastname: String,
+    }
+
+    let errors = strict::<WhoopsForm>("firstname=&check=true&lastname=").unwrap_err();
+    assert!(errors.iter().any(|e| e.name.as_ref().unwrap() == "lastname"));
+    assert!(errors.iter().any(|e| e.name.as_ref().unwrap() == "firstname"));
+}
+
+#[test]
 fn raw_ident_form() {
     #[derive(Debug, PartialEq, FromForm)]
     struct RawIdentForm {
@@ -500,14 +545,17 @@ struct Person<'r> {
 
 #[test]
 fn test_nested_multi() {
-    let person: Person = strict("sitting.barks=true&sitting.trained=true").unwrap();
+    let person: Person = lenient("sitting.barks=true&sitting.trained=true").unwrap();
     assert_eq!(person, Person {
         sitting: Dog { barks: true, trained: true },
         cats: vec![],
         dogs: vec![],
     });
 
-    let person: Person = strict("sitting.barks=true&sitting.trained=true\
+    let person = strict::<Person>("sitting.barks=true&sitting.trained=true");
+    assert!(person.is_err());
+
+    let person: Person = lenient("sitting.barks=true&sitting.trained=true\
         &dogs[0].name=fido&dogs[0].pet.trained=yes&dogs[0].age=7&dogs[0].pet.barks=no\
     ").unwrap();
     assert_eq!(person, Person {
@@ -520,7 +568,11 @@ fn test_nested_multi() {
         }]
     });
 
-    let person: Person = strict("sitting.trained=no&sitting.barks=true\
+    let person = strict::<Person>("sitting.barks=true&sitting.trained=true\
+        &dogs[0].name=fido&dogs[0].pet.trained=yes&dogs[0].age=7&dogs[0].pet.barks=no");
+    assert!(person.is_err());
+
+    let person: Person = lenient("sitting.trained=no&sitting.barks=true\
         &dogs[0].name=fido&dogs[0].pet.trained=yes&dogs[0].age=7&dogs[0].pet.barks=no\
         &dogs[1].pet.barks=true&dogs[1].name=Bob&dogs[1].pet.trained=no&dogs[1].age=1\
     ").unwrap();
@@ -680,7 +732,7 @@ fn test_defaults() {
 
     fn test_btreemap() -> BTreeMap<Vec<usize>, &'static str> {
         let mut map = BTreeMap::new();
-        map.insert(vec![], "empty");
+        map.insert(vec![1], "empty");
         map.insert(vec![1, 2], "one-and-two");
         map.insert(vec![3, 7, 9], "prime");
         map
@@ -801,7 +853,7 @@ fn test_defaults() {
     let form = form3.unwrap();
     let form_string = format!("{}", &form as &dyn UriDisplay<Query>);
     let form4: form::Result<'_, FormWithDefaults> = strict(&form_string);
-    assert_eq!(form4, Ok(form));
+    assert_eq!(form4, Ok(form), "parse from {}", form_string);
 
     #[derive(FromForm, UriDisplayQuery, PartialEq, Debug)]
     struct OwnedFormWithDefaults {
@@ -815,7 +867,6 @@ fn test_defaults() {
         btreemap: BTreeMap<Vec<usize>, String>,
     }
 
-    // And that strict parsing still works even when encoded.
     let form5: Option<OwnedFormWithDefaults> = lenient("").ok();
     assert_eq!(form5, Some(OwnedFormWithDefaults {
         btreemap: {
@@ -827,7 +878,10 @@ fn test_defaults() {
         }
     }));
 
-    let form = form5.unwrap();
+    // And that strict parsing still works even when encoded. We add one value
+    // to the empty vec because it would not parse as `strict` otherwise.
+    let mut form = form5.unwrap();
+    form.btreemap.remove(&vec![]);
     let form_string = format!("{}", &form as &dyn UriDisplay<Query>);
     let form6: form::Result<'_, OwnedFormWithDefaults> = strict_encoded(&form_string);
     assert_eq!(form6, Ok(form));
@@ -930,7 +984,7 @@ fn json_wrapper_works() {
     assert_eq!(form, JsonToken(Json("foo bar")));
 }
 
-// FIXME: https://github.com/rust-lang/rust/issues/86706
+#[allow(renamed_and_removed_lints)]
 #[allow(private_in_public)]
 struct Q<T>(T);
 

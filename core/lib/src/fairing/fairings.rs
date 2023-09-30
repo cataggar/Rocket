@@ -19,6 +19,7 @@ pub struct Fairings {
     liftoff: Vec<usize>,
     request: Vec<usize>,
     response: Vec<usize>,
+    shutdown: Vec<usize>,
 }
 
 macro_rules! iter {
@@ -46,6 +47,7 @@ impl Fairings {
             .chain(self.liftoff.iter())
             .chain(self.request.iter())
             .chain(self.response.iter())
+            .chain(self.shutdown.iter())
     }
 
     pub fn add(&mut self, fairing: Box<dyn Fairing>) {
@@ -90,6 +92,7 @@ impl Fairings {
                 remove(i, &mut self.liftoff);
                 remove(i, &mut self.request);
                 remove(i, &mut self.response);
+                remove(i, &mut self.shutdown);
             }
         }
 
@@ -99,6 +102,7 @@ impl Fairings {
         if this_info.kind.is(Kind::Liftoff) { self.liftoff.push(index); }
         if this_info.kind.is(Kind::Request) { self.request.push(index); }
         if this_info.kind.is(Kind::Response) { self.response.push(index); }
+        if this_info.kind.is(Kind::Shutdown) { self.shutdown.push(index); }
     }
 
     pub fn append(&mut self, others: &mut Fairings) {
@@ -153,6 +157,12 @@ impl Fairings {
         }
     }
 
+    #[inline(always)]
+    pub async fn handle_shutdown(&self, rocket: &Rocket<Orbit>) {
+        let shutdown_futures = iter!(self.shutdown).map(|f| f.on_shutdown(rocket));
+        futures::future::join_all(shutdown_futures).await;
+    }
+
     pub fn audit(&self) -> Result<(), &[Info]> {
         match self.failures.is_empty() {
             true => Ok(()),
@@ -163,11 +173,11 @@ impl Fairings {
     pub fn pretty_print(&self) {
         let active_fairings = self.active().collect::<HashSet<_>>();
         if !active_fairings.is_empty() {
-            launch_info!("{}{}:", Paint::emoji("📡 "), Paint::magenta("Fairings"));
+            launch_meta!("{}{}:", "📡 ".emoji(), "Fairings".magenta());
 
             for (_, fairing) in iter!(self, active_fairings.into_iter()) {
-                launch_info_!("{} ({})", Paint::default(fairing.info().name).bold(),
-                Paint::blue(fairing.info().kind).bold());
+                let (name, kind) = (fairing.info().name, fairing.info().kind);
+                launch_meta_!("{} ({})", name.primary().bold(), kind.blue().bold());
             }
         }
     }
@@ -184,6 +194,7 @@ impl std::fmt::Debug for Fairings {
             .field("liftoff", &debug_info(iter!(self.liftoff)))
             .field("request", &debug_info(iter!(self.request)))
             .field("response", &debug_info(iter!(self.response)))
+            .field("shutdown", &debug_info(iter!(self.shutdown)))
             .finish()
     }
 }

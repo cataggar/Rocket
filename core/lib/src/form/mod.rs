@@ -45,7 +45,8 @@
 //!   * `map[k:1]=Bob`
 //!   * `people[bob]nickname=Stan`
 //!
-//! See [`FromForm`] for full details on push-parsing and complete examples.
+//! See [`FromForm`] for full details on push-parsing and complete examples, and
+//! [`Form`] for how to accept forms in a request handler.
 
 // ## Maps w/named Fields (`struct`)
 //
@@ -368,6 +369,7 @@ mod context;
 mod strict;
 mod lenient;
 mod parser;
+mod buffer;
 pub mod validate;
 pub mod name;
 pub mod error;
@@ -383,6 +385,9 @@ pub use rocket_codegen::{FromForm, FromFormField};
 
 #[doc(inline)]
 pub use self::error::{Errors, Error};
+
+#[doc(hidden)]
+pub use self::buffer::{SharedStack, Shareable};
 
 pub use field::*;
 pub use options::*;

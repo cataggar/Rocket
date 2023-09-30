@@ -1,6 +1,6 @@
 //! Automatic JSON (de)serialization support.
 //!
-//! See [`Json`](Json) for details.
+//! See [`Json`] for details.
 //!
 //! # Enabling
 //!
@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies.rocket]
-//! version = "0.5.0-rc.1"
+//! version = "=0.5.0-rc.3"
 //! features = ["json"]
 //! ```
 //!

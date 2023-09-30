@@ -93,13 +93,13 @@ impl<K: 'static, C: Poolable> ConnectionPool<K, C> {
         })
     }
 
-    async fn get(&self) -> Result<Connection<K, C>, ()> {
+    pub async fn get(&self) -> Option<Connection<K, C>> {
         let duration = std::time::Duration::from_secs(self.config.timeout as u64);
         let permit = match timeout(duration, self.semaphore.clone().acquire_owned()).await {
             Ok(p) => p.expect("internal invariant broken: semaphore should not be closed"),
             Err(_) => {
                 error_!("database connection retrieval timed out");
-                return Err(());
+                return None;
             }
         };
 
@@ -107,22 +107,22 @@ impl<K: 'static, C: Poolable> ConnectionPool<K, C> {
             .expect("internal invariant broken: self.pool is Some");
 
         match run_blocking(move || pool.get_timeout(duration)).await {
-            Ok(c) => Ok(Connection {
+            Ok(c) => Some(Connection {
                 connection: Arc::new(Mutex::new(Some(c))),
                 permit: Some(permit),
                 _marker: PhantomData,
             }),
             Err(e) => {
                 error_!("failed to get a database connection: {}", e);
-                Err(())
+                None
             }
         }
     }
 
     #[inline]
     pub async fn get_one<P: Phase>(rocket: &Rocket<P>) -> Option<Connection<K, C>> {
-        match rocket.state::<Self>() {
-            Some(pool) => match pool.get().await.ok() {
+        match Self::pool(rocket) {
+            Some(pool) => match pool.get().await {
                 Some(conn) => Some(conn),
                 None => {
                     error_!("no connections available for `{}`", std::any::type_name::<K>());
@@ -137,13 +137,12 @@ impl<K: 'static, C: Poolable> ConnectionPool<K, C> {
     }
 
     #[inline]
-    pub async fn get_pool<P: Phase>(rocket: &Rocket<P>) -> Option<Self> {
-        rocket.state::<Self>().cloned()
+    pub fn pool<P: Phase>(rocket: &Rocket<P>) -> Option<&Self> {
+        rocket.state::<Self>()
     }
 }
 
 impl<K: 'static, C: Poolable> Connection<K, C> {
-    #[inline]
     pub async fn run<F, R>(&self, f: F) -> R
         where F: FnOnce(&mut C) -> R + Send + 'static,
               R: Send + 'static,
@@ -196,7 +195,11 @@ impl<K, C: Poolable> Drop for Connection<K, C> {
 impl<K, C: Poolable> Drop for ConnectionPool<K, C> {
     fn drop(&mut self) {
         let pool = self.pool.take();
-        tokio::task::spawn_blocking(move || drop(pool));
+        // Only use spawn_blocking if the Tokio runtime is still available
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || drop(pool));
+        }
+        // Otherwise the pool will be dropped on the current thread
     }
 }
 
@@ -207,7 +210,7 @@ impl<'r, K: 'static, C: Poolable> FromRequest<'r> for Connection<K, C> {
     #[inline]
     async fn from_request(request: &'r Request<'_>) -> Outcome<Self, ()> {
         match request.rocket().state::<ConnectionPool<K, C>>() {
-            Some(c) => c.get().await.into_outcome(Status::ServiceUnavailable),
+            Some(c) => c.get().await.into_outcome((Status::ServiceUnavailable, ())),
             None => {
                 error_!("Missing database fairing for `{}`", std::any::type_name::<K>());
                 Outcome::Failure((Status::InternalServerError, ()))
@@ -221,10 +224,13 @@ impl<K: 'static, C: Poolable> Sentinel for Connection<K, C> {
         use rocket::yansi::Paint;
 
         if rocket.state::<ConnectionPool<K, C>>().is_none() {
-            let conn = Paint::default(std::any::type_name::<K>()).bold();
-            let fairing = Paint::default(format!("{}::fairing()", conn)).wrap().bold();
-            error!("requesting `{}` DB connection without attaching `{}`.", conn, fairing);
-            info_!("Attach `{}` to use database connection pooling.", fairing);
+            let conn = std::any::type_name::<K>().primary().bold();
+            error!("requesting `{}` DB connection without attaching `{}{}`.",
+                conn, conn.linger(), "::fairing()".clear());
+
+            info_!("Attach `{}{}` to use database connection pooling.",
+                conn.linger(), "::fairing()".clear());
+
             return true;
         }
 

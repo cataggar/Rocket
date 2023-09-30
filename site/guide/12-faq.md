@@ -54,13 +54,14 @@ looks like:
 
 | Framework            | Dependencies | Build Time |
 |----------------------|--------------|------------|
-| Rocket 0.5-rc.2      | 148          | 44s        |
-| Actix-Web 4.0-beta.8 | 175          | 47s        |
-| Tide 0.16            | 209          | 34s        |
-| Warp 0.3             | 148          | 37s        |
+| Rocket 0.5-rc.2      | 151          | 50s        |
+| Actix-Web 4.0.1      | 155          | 40s        |
+| Tide 0.16            | 202          | 37s        |
+| Warp 0.3.2           | 132          | 30s        |
+| Axum 0.5.4           | 81           | 18s        |
 
 <small>· Measurements taken on a MacBookPro15,1 Intel Core i9 @ 2.9GHZ, macOS
-11.2.1, Rust 1.53 stable. Best of 3.</small><br />
+12.1, Rust 1.60 stable. Best of 3.</small><br />
 <small>· Rocket includes features like multipart parsing and static file
 serving that would require additional deps in other frameworks.</small>
 
@@ -112,7 +113,7 @@ non-exhaustive list of caveats:
      DDoS attacks or certain DoS attacks which can be mitigated by an external
      service.
 
-  2. Use a TLS termination proxy (perhaps from 1.) for zero-downtown certificate
+  2. Use a TLS termination proxy (perhaps from 1.) for zero-downtime certificate
      rotation.
 
   3. Properly configure your databases and database pools, especially with
@@ -157,11 +158,11 @@ runtime performance. _**This is false.**_ Rocket's usability derives largely
 from compile-time checks with _zero_ bearing on runtime performance.
 
 So what about benchmarks? Well, benchmarking is _hard_, and besides often being
-conducted incorrectly, often appear to say more than they do. So, when you see a
-benchmark for "Hello, world!", you should know that the benchmark's relevance
-doesn't extend far beyond "Hello, world!" servers and the specific way the
-measurement was taken. In other words, it provides a baseline truth that is hard
-to extrapolate to real-world use-cases, _your_ use-case.
+conducted incorrectly<em>*</em>, often appear to say more than they do. So, when
+you see a benchmark for "Hello, world!", you should know that the benchmark's
+relevance doesn't extend far beyond those specific "Hello, world!" servers and
+the specific way the measurement was taken. In other words, it provides _some_
+baseline that is hard to extrapolate to real-world use-cases, _your_ use-case.
 
 Nevertheless, here are some things you can consider as _generally_ true about
 Rocket applications:
@@ -170,10 +171,10 @@ Rocket applications:
     languages like Python or Ruby.
   * They'll perform much better than those written in VM or JIT languages like
     JavaScript or Java.
-  * They'll perform a bit better than those written in compiled but GC'd
-    languages like Go.
-  * They'll perform competitively with those written in compiled, non-GC'd
-    languages like Rust or C.
+  * They'll perform a bit better than those written in compiled-to-native but
+    GC'd languages like Go.
+  * They'll perform competitively with those written in compiled-to-native,
+    non-GC'd languages like Rust or C.
 
 Again, we emphasize _generally_ true. It is trivial to write a Rocket
 application that is slower than a similar Python application.
@@ -183,6 +184,9 @@ it enables your _application itself_ to perform well. Rocket takes great care to
 enable your application to perform as little work as possible through
 unique-to-Rocket features like [managed state], [request-local state], and
 zero-copy parsing and deserialization.
+
+<small>* A common mistake is to pit against Rocket's "Hello, world!" without
+normalizing for response size, especially security headers.</small>
 
 </div>
 </details>
@@ -200,11 +204,11 @@ What are some examples of "big" apps written in Rocket?
 Here are some notable projects and websites in Rocket we're aware of:
 
   * [Vaultwarden] - A BitWarden Server
-  * [Conduit] - A Matrix Homeserver
   * [Rust-Lang.org] - Rust Language Website
   * [Plume] - Federated Blogging Engine
   * [Hagrid] - OpenPGP KeyServer ([keys.openpgp.org](https://keys.openpgp.org/))
   * [SourceGraph Syntax Highlighter] - Syntax Highlighting API
+  * [Revolt] - Open source user-first chat platform
 
 [Let us know] if you have a notable, public facing application written in Rocket
 you'd like to see here!
@@ -214,8 +218,9 @@ you'd like to see here!
 [Rust-Lang.org]: https://www.rust-lang.org/
 [Plume]: https://github.com/Plume-org/Plume
 [Hagrid]: https://gitlab.com/hagrid-keyserver/hagrid/
-[SourceGraph Syntax Highlighter]: https://github.com/sourcegraph/syntect_server
+[SourceGraph Syntax Highlighter]: https://github.com/sourcegraph/sourcegraph/tree/main/docker-images/syntax-highlighter
 [Let us know]: https://github.com/SergioBenitez/Rocket/discussions/categories/show-and-tell
+[Revolt]: https://github.com/revoltchat/backend
 
 </div>
 </details>
@@ -273,7 +278,7 @@ Can I, and if so how, do I use WebSockets?
 
 Rocket doesn't support WebSockets quite yet. We're [working on it].
 
-That being said, Rocket _does_ suport [Server-Sent Events], which allows for
+That being said, Rocket _does_ support [Server-Sent Events], which allows for
 real-time _unidirectional_ communication from the server to the client. This is
 often sufficient for many of the applications that WebSockets are typically used
 for. For instance, the [chat example] uses SSE to implement a real-time,
@@ -314,11 +319,14 @@ How do I handle file uploads? What is this "multipart" in my stream?
 </summary>
 <div class="content">
 
-For a quick example on how to handle file uploads, see [multipart forms].
+For a quick example on how to handle file uploads, see [multipart forms]. The
+gist is: use `Form<TempFile>` as a data guard.
 
-File uploads are transmitted by the browser as [multipart] form submissions,
-which Rocket handles natively as a [`DataField`]. The [`TempFile`] form guard
-can accept a `DataField` and stream the data to disk for persistence.
+File uploads are encoded and transmitted by the browser as [multipart] forms.
+The raw stream, as seen by [`Data`] for example, thus contains the necessary
+metadata to encode the form. Rocket's [`Form`] data guard can parse these form
+submissions into any type that implements [`FromForm`]. This includes types like
+[`TempFile`] which streams the decoded data to disk for persistence.
 </div>
 </details>
 
@@ -326,6 +334,10 @@ can accept a `DataField` and stream the data to disk for persistence.
 [multipart forms]: ../requests/#multipart
 [`DataField`]: @api/rocket/form/struct.DataField.html
 [`TempFile`]: @api/rocket/fs/enum.TempFile.html
+[`DataField`]: @api/rocket/data/struct.Data.html
+[`Form`]: @api/rocket/form/struct.Form.html
+[`FromForm`]: @api/rocket/form/trait.FromForm.html
+[`Data`]: @api/rocket/struct.Data.html
 
 <details id="raw-request">
 <summary>
@@ -352,7 +364,7 @@ out-of-the-box, and you can implement your own, too. See the following:
   * Parameter Guards: [`FromParam`]
   * Multi-Segment Guards: [`FromSegments`]
   * Data Guards: [`FromData`]
-  * Form Guards: [`FromFrom`]
+  * Form Guards: [`FromForm`]
   * Request Guards: [`FromRequest`]
 </div>
 </details>
@@ -361,7 +373,7 @@ out-of-the-box, and you can implement your own, too. See the following:
 [`FromParam`]: @api/rocket/request/trait.FromParam.html
 [`FromSegments`]: @api/rocket/request/trait.FromSegments.html
 [`FromData`]: @api/rocket/data/trait.FromData.html
-[`FromFrom`]: @api/rocket/form/trait.FromForm.html
+[`FromForm`]: @api/rocket/form/trait.FromForm.html
 [`FromRequest`]: @api/rocket/request/trait.FromRequest.html
 
 <details id="response-headers">
@@ -375,7 +387,7 @@ That depends on the header!
 
 Any "transport" headers (`Content-Length`, `Transfer-Encoding`, etc.) are
 automatically set by Rocket and cannot be directly overridden for correctness
-reasons. The rest are set by a type's [`Responder`] implementation.
+reasons. The rest are set by a route's [`Responder`].
 
 **Status**
 
@@ -634,7 +646,7 @@ is to depend on a `contrib` library from git while also depending on a
 `crates.io` version of Rocket or vice-versa:
 
 ```toml
-rocket = "0.5.0-rc.1"
+rocket = "=0.5.0-rc.3"
 rocket_db_pools = { git = "https://github.com/SergioBenitez/Rocket.git" }
 ```
 

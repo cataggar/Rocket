@@ -1,7 +1,7 @@
 pub mod oid {
     //! Lower-level OID types re-exported from
-    //! [`oid_registry`](https://docs.rs/oid-registry/0.1) and
-    //! [`der-parser`](https://docs.rs/der-parser/5).
+    //! [`oid_registry`](https://docs.rs/oid-registry/0.4) and
+    //! [`der-parser`](https://docs.rs/der-parser/7).
 
     pub use x509_parser::oid_registry::*;
     pub use x509_parser::der_parser::oid::*;
@@ -16,7 +16,7 @@ pub mod bigint {
 
 pub mod x509 {
     //! Lower-level X.509 types re-exported from
-    //! [`x509_parser`](https://docs.rs/x509-parser/0.9).
+    //! [`x509_parser`](https://docs.rs/x509-parser/0.13).
     //!
     //! Lack of documentation is directly inherited from the source crate.
     //! Prefer to use Rocket's wrappers when possible.
@@ -30,64 +30,23 @@ pub mod x509 {
     pub use x509_parser::x509::*;
     pub use x509_parser::der_parser::der;
     pub use x509_parser::der_parser::ber;
+    pub use x509_parser::traits::*;
 }
 
 use std::fmt;
 use std::ops::Deref;
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use ref_cast::RefCast;
 use x509_parser::nom;
-use x509::{ParsedExtension, X509Name, X509Certificate, TbsCertificate, X509Error};
+use x509::{ParsedExtension, X509Name, X509Certificate, TbsCertificate, X509Error, FromDer};
 use oid::OID_X509_EXT_SUBJECT_ALT_NAME as SUBJECT_ALT_NAME;
 
-use crate::listener::RawCertificate;
+use crate::listener::CertificateData;
 
 /// A type alias for [`Result`](std::result::Result) with the error type set to
 /// [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// An error returned by the [`Certificate`] request guard.
-///
-/// To retrieve this error in a handler, use an `mtls::Result<Certificate>`
-/// guard type:
-///
-/// ```rust
-/// # extern crate rocket;
-/// # use rocket::get;
-/// use rocket::mtls::{self, Certificate};
-///
-/// #[get("/auth")]
-/// fn auth(cert: mtls::Result<Certificate<'_>>) {
-///     match cert {
-///         Ok(cert) => { /* do something with the client cert */ },
-///         Err(e) => { /* do something with the error */ },
-///     }
-/// }
-/// ```
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum Error {
-    /// The certificate chain presented by the client had no certificates.
-    Empty,
-    /// The certificate contained neither a subject nor a subjectAlt extension.
-    NoSubject,
-    /// There is no subject and the subjectAlt is not marked as critical.
-    NonCriticalSubjectAlt,
-    // FIXME: Waiting on https://github.com/rusticata/x509-parser/pull/92.
-    // Parse(X509Error),
-    /// An error occurred while parsing the certificate.
-    #[doc(hidden)]
-    Parse(String),
-    /// The certificate parsed partially but is incomplete.
-    ///
-    /// If `Some(n)`, then `n` more bytes were expected. Otherwise, the number
-    /// of expected bytes is unknown.
-    Incomplete(Option<NonZeroUsize>),
-    /// The certificate contained `.0` bytes of trailing data.
-    Trailing(usize),
-}
 
 /// A request guard for validated, verified client certificates.
 ///
@@ -103,9 +62,10 @@ pub enum Error {
 ///   * The certificates are active and not yet expired.
 ///   * The client's certificate chain was signed by the CA identified by the
 ///     configured `ca_certs` and with respect to SNI, if any. See [module level
-///     docs](self) for configuration details.
+///     docs](crate::mtls) for configuration details.
 ///
-/// If the client does not present certificates, the guard _forwards_.
+/// If the client does not present certificates, the guard _forwards_ with a
+/// status of 401 Unauthorized.
 ///
 /// If the certificate chain fails to validate or verify, the guard _fails_ with
 /// the respective [`Error`].
@@ -122,6 +82,7 @@ pub enum Error {
 /// use rocket::mtls::{self, bigint::BigUint, Certificate};
 /// use rocket::request::{Request, FromRequest, Outcome};
 /// use rocket::outcome::try_outcome;
+/// use rocket::http::Status;
 ///
 /// // The serial number for the certificate issued to the admin.
 /// const ADMIN_SERIAL: &str = "65828378108300243895479600452308786010218223563";
@@ -138,7 +99,7 @@ pub enum Error {
 ///         if let Some(true) = cert.has_serial(ADMIN_SERIAL) {
 ///             Outcome::Success(CertifiedAdmin(cert))
 ///         } else {
-///             Outcome::Forward(())
+///             Outcome::Forward(Status::Unauthorized)
 ///         }
 ///     }
 /// }
@@ -181,9 +142,11 @@ pub enum Error {
 ///     // _does_ run if a valid (Ok) or invalid (Err) one was presented.
 /// }
 /// ```
-#[repr(transparent)]
 #[derive(Debug, PartialEq)]
-pub struct Certificate<'a>(X509Certificate<'a>);
+pub struct Certificate<'a> {
+    x509: X509Certificate<'a>,
+    data: &'a CertificateData,
+}
 
 /// An X.509 Distinguished Name (DN) found in a [`Certificate`].
 ///
@@ -194,6 +157,44 @@ pub struct Certificate<'a>(X509Certificate<'a>);
 #[derive(Debug, PartialEq, RefCast)]
 pub struct Name<'a>(X509Name<'a>);
 
+/// An error returned by the [`Certificate`] request guard.
+///
+/// To retrieve this error in a handler, use an `mtls::Result<Certificate>`
+/// guard type:
+///
+/// ```rust
+/// # extern crate rocket;
+/// # use rocket::get;
+/// use rocket::mtls::{self, Certificate};
+///
+/// #[get("/auth")]
+/// fn auth(cert: mtls::Result<Certificate<'_>>) {
+///     match cert {
+///         Ok(cert) => { /* do something with the client cert */ },
+///         Err(e) => { /* do something with the error */ },
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Error {
+    /// The certificate chain presented by the client had no certificates.
+    Empty,
+    /// The certificate contained neither a subject nor a subjectAlt extension.
+    NoSubject,
+    /// There is no subject and the subjectAlt is not marked as critical.
+    NonCriticalSubjectAlt,
+    /// An error occurred while parsing the certificate.
+    Parse(X509Error),
+    /// The certificate parsed partially but is incomplete.
+    ///
+    /// If `Some(n)`, then `n` more bytes were expected. Otherwise, the number
+    /// of expected bytes is unknown.
+    Incomplete(Option<NonZeroUsize>),
+    /// The certificate contained `.0` bytes of trailing data.
+    Trailing(usize),
+}
+
 impl<'a> Certificate<'a> {
     fn parse_one(raw: &[u8]) -> Result<X509Certificate<'_>> {
         let (left, x509) = X509Certificate::from_der(raw)?;
@@ -201,8 +202,9 @@ impl<'a> Certificate<'a> {
             return Err(Error::Trailing(left.len()));
         }
 
+        // Ensure we have a subject or a subjectAlt.
         if x509.subject().as_raw().is_empty() {
-            if let Some(ext) = x509.extensions().get(&SUBJECT_ALT_NAME) {
+            if let Some(ext) = x509.extensions().iter().find(|e| e.oid == SUBJECT_ALT_NAME) {
                 if !matches!(ext.parsed_extension(), ParsedExtension::SubjectAlternativeName(..)) {
                     return Err(Error::NoSubject);
                 } else if !ext.critical {
@@ -218,16 +220,15 @@ impl<'a> Certificate<'a> {
 
     #[inline(always)]
     fn inner(&self) -> &TbsCertificate<'a> {
-        &self.0.tbs_certificate
+        &self.x509.tbs_certificate
     }
 
     /// PRIVATE: For internal Rocket use only!
     #[doc(hidden)]
-    pub fn parse(chain: &[RawCertificate]) -> Result<Certificate<'_>> {
-        match chain.first() {
-            Some(cert) => Certificate::parse_one(&cert.0).map(Certificate),
-            None => Err(Error::Empty)
-        }
+    pub fn parse(chain: &[CertificateData]) -> Result<Certificate<'_>> {
+        let data = chain.first().ok_or_else(|| Error::Empty)?;
+        let x509 = Certificate::parse_one(&data.0)?;
+        Ok(Certificate { x509, data })
     }
 
     /// Returns the serial number of the X.509 certificate.
@@ -266,7 +267,7 @@ impl<'a> Certificate<'a> {
         self.inner().version.0
     }
 
-    /// Returns the subject (a "DN" or "Distinguised Name") of the X.509
+    /// Returns the subject (a "DN" or "Distinguished Name") of the X.509
     /// certificate.
     ///
     /// # Example
@@ -287,7 +288,7 @@ impl<'a> Certificate<'a> {
         Name::ref_cast(&self.inner().subject)
     }
 
-    /// Returns the issuer (a "DN" or "Distinguised Name") of the X.509
+    /// Returns the issuer (a "DN" or "Distinguished Name") of the X.509
     /// certificate.
     ///
     /// # Example
@@ -308,7 +309,7 @@ impl<'a> Certificate<'a> {
         Name::ref_cast(&self.inner().issuer)
     }
 
-    /// Returns a map of the extensions in the X.509 certificate.
+    /// Returns a slice of the extensions in the X.509 certificate.
     ///
     /// # Example
     ///
@@ -319,8 +320,8 @@ impl<'a> Certificate<'a> {
     ///
     /// #[get("/auth")]
     /// fn auth(cert: Certificate<'_>) {
-    ///     let subject_alt = cert.extensions()
-    ///         .get(&oid::OID_X509_EXT_SUBJECT_ALT_NAME)
+    ///     let subject_alt = cert.extensions().iter()
+    ///         .find(|e| e.oid == oid::OID_X509_EXT_SUBJECT_ALT_NAME)
     ///         .and_then(|e| match e.parsed_extension() {
     ///             x509::ParsedExtension::SubjectAlternativeName(s) => Some(s),
     ///             _ => None
@@ -335,8 +336,8 @@ impl<'a> Certificate<'a> {
     ///     }
     /// }
     /// ```
-    pub fn extensions(&self) -> &HashMap<oid::Oid<'a>, x509::X509Extension<'a>> {
-        &self.inner().extensions
+    pub fn extensions(&self) -> &[x509::X509Extension<'a>] {
+        &self.inner().extensions()
     }
 
     /// Checks if the certificate has the serial number `number`.
@@ -363,6 +364,31 @@ impl<'a> Certificate<'a> {
     pub fn has_serial(&self, number: &str) -> Option<bool> {
         let uint: bigint::BigUint = number.parse().ok()?;
         Some(&uint == self.serial())
+    }
+
+    /// Returns the raw, unmodified, DER-encoded X.509 certificate data bytes.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # extern crate rocket;
+    /// # use rocket::get;
+    /// use rocket::mtls::Certificate;
+    ///
+    /// const SHA256_FINGERPRINT: &str =
+    ///     "CE C2 4E 01 00 FF F7 78 CB A4 AA CB D2 49 DD 09 \
+    ///      02 EF 0E 9B DA 89 2A E4 0D F4 09 83 97 C1 97 0D";
+    ///
+    /// #[get("/auth")]
+    /// fn auth(cert: Certificate<'_>) {
+    ///     # fn sha256_fingerprint(bytes: &[u8]) -> String { todo!() }
+    ///     if sha256_fingerprint(cert.as_bytes()) == SHA256_FINGERPRINT {
+    ///         println!("certificate fingerprint matched");
+    ///     }
+    /// }
+    /// ```
+    pub fn as_bytes(&self) -> &'a [u8] {
+        &self.data.0
     }
 }
 
@@ -448,7 +474,7 @@ impl<'a> Name<'a> {
     /// `self`.
     ///
     /// Note that email addresses need not be UTF-8 strings, or strings at all.
-    /// This method filters the email addresss in `self` to those that are. Use
+    /// This method filters the email address in `self` to those that are. Use
     /// the raw [`iter_email()`](#method.iter_email) to iterate over all value
     /// types.
     ///
@@ -522,7 +548,7 @@ impl From<nom::Err<X509Error>> for Error {
         match e {
             nom::Err::Incomplete(nom::Needed::Unknown) => Error::Incomplete(None),
             nom::Err::Incomplete(nom::Needed::Size(n)) => Error::Incomplete(Some(n)),
-            nom::Err::Error(e) | nom::Err::Failure(e) => Error::Parse(e.to_string()),
+            nom::Err::Error(e) | nom::Err::Failure(e) => Error::Parse(e),
         }
     }
 }

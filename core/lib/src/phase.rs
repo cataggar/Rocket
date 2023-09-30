@@ -1,4 +1,4 @@
-use state::Container;
+use state::TypeMap;
 use figment::Figment;
 
 use crate::{Catcher, Config, Rocket, Route, Shutdown};
@@ -73,20 +73,21 @@ macro_rules! phases {
 }
 
 phases! {
-    /// The initial launch [`Phase`].
+    /// The initial launch [`Phase`]. See [Rocket#build](`Rocket#build`) for
+    /// phase details.
     ///
-    /// An instance of `Rocket` in this phase is typed as [`Rocket<Build>`] and
-    /// represents a transient, in-progress build. See [`Rocket#build`] for
-    /// details.
+    /// An instance of `Rocket` in this phase is typed as [`Rocket<Build>`]: a
+    /// transient, in-progress build.
     Build (#[derive(Default, Debug)] Building) {
         pub(crate) routes: Vec<Route>,
         pub(crate) catchers: Vec<Catcher>,
         pub(crate) fairings: Fairings,
         pub(crate) figment: Figment,
-        pub(crate) state: Container![Send + Sync],
+        pub(crate) state: TypeMap![Send + Sync],
     }
 
-    /// The second launch [`Phase`]: post-build but pre-orbit.
+    /// The second launch [`Phase`]: post-build but pre-orbit. See
+    /// [Rocket#ignite](`Rocket#ignite`) for details.
     ///
     /// An instance of `Rocket` in this phase is typed as [`Rocket<Ignite>`] and
     /// represents a fully built and finalized application server ready for
@@ -96,20 +97,21 @@ phases! {
         pub(crate) fairings: Fairings,
         pub(crate) figment: Figment,
         pub(crate) config: Config,
-        pub(crate) state: Container![Send + Sync],
+        pub(crate) state: TypeMap![Send + Sync],
         pub(crate) shutdown: Shutdown,
     }
 
-    /// The final launch [`Phase`].
+    /// The final launch [`Phase`]. See [Rocket#orbit](`Rocket#orbit`) for
+    /// details.
     ///
     /// An instance of `Rocket` in this phase is typed as [`Rocket<Orbit>`] and
-    /// represents a running application. See [`Rocket#orbit`] for full details.
+    /// represents a running application.
     Orbit (#[derive(Debug)] Orbiting) {
         pub(crate) router: Router,
         pub(crate) fairings: Fairings,
         pub(crate) figment: Figment,
         pub(crate) config: Config,
-        pub(crate) state: Container![Send + Sync],
+        pub(crate) state: TypeMap![Send + Sync],
         pub(crate) shutdown: Shutdown,
     }
 }

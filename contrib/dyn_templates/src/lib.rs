@@ -12,7 +12,7 @@
 //!
 //!      ```toml
 //!      [dependencies.rocket_dyn_templates]
-//!      version = "0.1.0-rc.1"
+//!      version = "=0.1.0-rc.3"
 //!      features = ["handlebars", "tera"]
 //!      ```
 //!
@@ -26,17 +26,16 @@
 //!
 //!      ```rust
 //!      # #[macro_use] extern crate rocket;
-//!      use rocket_dyn_templates::Template;
+//!      use rocket_dyn_templates::{Template, context};
+//!
+//!      #[get("/")]
+//!      fn index() -> Template {
+//!          Template::render("template-name", context! { field: "value" })
+//!      }
 //!
 //!      #[launch]
 //!      fn rocket() -> _ {
 //!          rocket::build().attach(Template::fairing())
-//!      }
-//!
-//!      #[get("/")]
-//!      fn index() -> Template {
-//!          # let context = ();
-//!          Template::render("template-name", &context)
 //!      }
 //!      ```
 //!
@@ -116,10 +115,14 @@
 //!
 //! ## Rendering
 //!
-//! Templates are rendered with the `render` method. The method takes in the
-//! name of a template and a context to render the template with. The context
-//! can be any type that implements [`Serialize`] and would serialize to an
-//! `Object` value. The [`context!`] macro can also be used to create inline
+//! Templates are typically rendered indirectly via [`Template::render()`] which
+//! returns a `Template` responder which renders the template at response time.
+//! To render a template directly into a `String`, use [`Metadata::render()`]
+//! instead.
+//!
+//! Both methods take in a template name and context to use while rendering. The
+//! context can be any [`Serialize`] type that serializes to an `Object` (a
+//! dictionary) value. The [`context!`] macro may be used to create inline
 //! `Serialize`-able context objects.
 //!
 //! ## Automatic Reloading
@@ -178,6 +181,7 @@ use rocket::response::{self, Responder};
 use rocket::http::{ContentType, Status};
 use rocket::figment::{value::Value, error::Error};
 use rocket::serde::Serialize;
+use rocket::yansi::Paint;
 
 const DEFAULT_TEMPLATE_DIR: &str = "templates";
 
@@ -309,6 +313,8 @@ impl Template {
     /// be of any type that implements `Serialize`, such as `HashMap` or a
     /// custom `struct`.
     ///
+    /// To render a template directly into a string, use [`Metadata::render()`].
+    ///
     /// # Examples
     ///
     /// Using the `context` macro:
@@ -384,14 +390,14 @@ impl Template {
             None
         })?;
 
-        Template::render(name, context).finalize(&ctxt).ok().map(|v| v.0)
+        Template::render(name, context).finalize(&ctxt).ok().map(|v| v.1)
     }
 
     /// Actually render this template given a template context. This method is
     /// called by the `Template` `Responder` implementation as well as
     /// `Template::show()`.
     #[inline(always)]
-    fn finalize(self, ctxt: &Context) -> Result<(String, ContentType), Status> {
+    fn finalize(self, ctxt: &Context) -> Result<(ContentType, String), Status> {
         let name = &*self.name;
         let info = ctxt.templates.get(name).ok_or_else(|| {
             let ts: Vec<_> = ctxt.templates.keys().map(|s| s.as_str()).collect();
@@ -411,7 +417,7 @@ impl Template {
             Status::InternalServerError
         })?;
 
-        Ok((string, info.data_type.clone()))
+        Ok((info.data_type.clone(), string))
     }
 }
 
@@ -420,26 +426,24 @@ impl Template {
 /// rendering fails, an `Err` of `Status::InternalServerError` is returned.
 impl<'r> Responder<'r, 'static> for Template {
     fn respond_to(self, req: &'r Request<'_>) -> response::Result<'static> {
-        let (render, content_type) = {
-            let ctxt = req.rocket().state::<ContextManager>().ok_or_else(|| {
+        let ctxt = req.rocket()
+            .state::<ContextManager>()
+            .ok_or_else(|| {
                 error_!("Uninitialized template context: missing fairing.");
                 info_!("To use templates, you must attach `Template::fairing()`.");
                 info_!("See the `Template` documentation for more information.");
                 Status::InternalServerError
-            })?.context();
+            })?;
 
-            self.finalize(&ctxt)?
-        };
-
-        (content_type, render).respond_to(req)
+        self.finalize(&ctxt.context())?.respond_to(req)
     }
 }
 
 impl Sentinel for Template {
     fn abort(rocket: &Rocket<Ignite>) -> bool {
         if rocket.state::<ContextManager>().is_none() {
-            let template = rocket::yansi::Paint::default("Template").bold();
-            let fairing = rocket::yansi::Paint::default("Template::fairing()").bold();
+            let template = "Template".primary().bold();
+            let fairing = "Template::fairing()".primary().bold();
             error!("returning `{}` responder without attaching `{}`.", template, fairing);
             info_!("To use or query templates, you must attach `{}`.", fairing);
             info_!("See the `Template` documentation for more information.");
@@ -520,6 +524,7 @@ macro_rules! context {
     ($($key:ident $(: $value:expr)?),*$(,)?) => {{
         use $crate::serde::ser::{Serialize, Serializer, SerializeMap};
         use ::std::fmt::{Debug, Formatter};
+        use ::std::result::Result;
 
         #[allow(non_camel_case_types)]
         struct ContextMacroCtxObject<$($key: Serialize),*> {

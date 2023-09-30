@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, BTreeMap};
 use std::hash::Hash;
+use std::sync::Arc;
 
 use either::Either;
 use indexmap::IndexMap;
@@ -22,7 +23,7 @@ use crate::http::uncased::AsUncased;
 /// A form guard is a guard that operates on form fields, typically those with a
 /// particular name prefix. Form guards validate and parse form field data via
 /// implementations of `FromForm`. In other words, a type is a form guard _iff_
-/// it implements `FromFrom`.
+/// it implements `FromForm`.
 ///
 /// Form guards are used as the inner type of the [`Form`] data guard:
 ///
@@ -410,7 +411,7 @@ use crate::http::uncased::AsUncased;
 /// }
 /// ```
 ///
-/// The lifetime `'r` correponds to the lifetime of the request.
+/// The lifetime `'r` corresponds to the lifetime of the request.
 ///
 /// ## A More Involved Example
 ///
@@ -484,7 +485,7 @@ use crate::http::uncased::AsUncased;
 ///     // Finally, we finalize `A` and `B`. If both returned `Ok` and we
 ///     // encountered no errors during the push phase, we return our pair. If
 ///     // there were errors, we return them. If `A` and/or `B` failed, we
-///     // return the commulative errors.
+///     // return the commutative errors.
 ///     fn finalize(mut ctxt: Self::Context) -> form::Result<'v, Self> {
 ///         match (A::finalize(ctxt.left), B::finalize(ctxt.right)) {
 ///             (Ok(l), Ok(r)) if ctxt.errors.is_empty() => Ok(Pair(l, r)),
@@ -563,6 +564,16 @@ pub struct VecContext<'v, T: FromForm<'v>> {
 }
 
 impl<'v, T: FromForm<'v>> VecContext<'v, T> {
+    fn new(opts: Options) -> Self {
+        VecContext {
+            opts,
+            last_key: None,
+            current: None,
+            items: vec![],
+            errors: Errors::new(),
+        }
+    }
+
     fn shift(&mut self) {
         if let Some(current) = self.current.take() {
             match T::finalize(current) {
@@ -575,7 +586,7 @@ impl<'v, T: FromForm<'v>> VecContext<'v, T> {
     fn context(&mut self, name: &NameView<'v>) -> &mut T::Context {
         let this_key = name.key();
         let keys_match = match (self.last_key, this_key) {
-            (Some(k1), Some(k2)) if k1 == k2 => true,
+            (Some(k1), Some(k2)) => k1 == k2,
             _ => false
         };
 
@@ -594,28 +605,25 @@ impl<'v, T: FromForm<'v> + 'v> FromForm<'v> for Vec<T> {
     type Context = VecContext<'v, T>;
 
     fn init(opts: Options) -> Self::Context {
-        VecContext {
-            opts,
-            last_key: None,
-            current: None,
-            items: vec![],
-            errors: Errors::new(),
-        }
+        VecContext::new(opts)
     }
 
     fn push_value(this: &mut Self::Context, field: ValueField<'v>) {
         T::push_value(this.context(&field.name), field.shift());
     }
 
-    async fn push_data(ctxt: &mut Self::Context, field: DataField<'v, '_>) {
-        T::push_data(ctxt.context(&field.name), field.shift()).await
+    async fn push_data(this: &mut Self::Context, field: DataField<'v, '_>) {
+        T::push_data(this.context(&field.name), field.shift()).await
     }
 
     fn finalize(mut this: Self::Context) -> Result<'v, Self> {
         this.shift();
-        match this.errors.is_empty() {
-            true => Ok(this.items),
-            false => Err(this.errors)?,
+        if !this.errors.is_empty() {
+            Err(this.errors)
+        } else if this.opts.strict && this.items.is_empty() {
+            Err(Errors::from(ErrorKind::Missing))
+        } else {
+            Ok(this.items)
         }
     }
 }
@@ -623,10 +631,14 @@ impl<'v, T: FromForm<'v> + 'v> FromForm<'v> for Vec<T> {
 #[doc(hidden)]
 pub struct MapContext<'v, K, V> where K: FromForm<'v>, V: FromForm<'v> {
     opts: Options,
-    /// Maps from the string key to the index in `map`.
-    key_map: IndexMap<&'v str, (usize, NameView<'v>)>,
-    keys: Vec<K::Context>,
-    values: Vec<V::Context>,
+    /// Maps an index key (&str, map.key=foo, map.k:key) to its entry.
+    /// NOTE: `table`, `entries`, and `metadata` are always the same size.
+    table: IndexMap<&'v str, usize>,
+    /// The `FromForm` context for the (key, value) indexed by `table`.
+    entries: Vec<(K::Context, V::Context)>,
+    /// Recorded metadata for a given key/value pair.
+    metadata: Vec<NameView<'v>>,
+    /// Errors collected while finalizing keys and values.
     errors: Errors<'v>,
 }
 
@@ -636,31 +648,27 @@ impl<'v, K, V> MapContext<'v, K, V>
     fn new(opts: Options) -> Self {
         MapContext {
             opts,
-            key_map: IndexMap::new(),
-            keys: vec![],
-            values: vec![],
+            table: IndexMap::new(),
+            entries: vec![],
+            metadata: vec![],
             errors: Errors::new(),
         }
     }
 
-    fn ctxt(&mut self, key: &'v str, name: NameView<'v>) -> (&mut K::Context, &mut V::Context) {
-        match self.key_map.get(key) {
-            Some(&(i, _)) => (&mut self.keys[i], &mut self.values[i]),
+    fn ctxt(&mut self, key: &'v str, name: NameView<'v>) -> &mut (K::Context, V::Context) {
+        match self.table.get(key) {
+            Some(i) => &mut self.entries[*i],
             None => {
-                debug_assert_eq!(self.keys.len(), self.values.len());
-                let map_index = self.keys.len();
-                self.keys.push(K::init(self.opts));
-                self.values.push(V::init(self.opts));
-                self.key_map.insert(key, (map_index, name));
-                (self.keys.last_mut().unwrap(), self.values.last_mut().unwrap())
+                let i = self.entries.len();
+                self.table.insert(key, i);
+                self.entries.push((K::init(self.opts), V::init(self.opts)));
+                self.metadata.push(name);
+                &mut self.entries[i]
             }
         }
     }
 
-    fn push(
-        &mut self,
-        name: NameView<'v>
-    ) -> Option<Either<&mut K::Context, &mut V::Context>> {
+    fn push(&mut self, name: NameView<'v>) -> Option<Either<&mut K::Context, &mut V::Context>> {
         let index_pair = name.key()
             .map(|k| k.indices())
             .map(|mut i| (i.next(), i.next()))
@@ -668,7 +676,7 @@ impl<'v, K, V> MapContext<'v, K, V>
 
         match index_pair {
             (Some(key), None) => {
-                let is_new_key = !self.key_map.contains_key(key);
+                let is_new_key = !self.table.contains_key(key);
                 let (key_ctxt, val_ctxt) = self.ctxt(key, name);
                 if is_new_key {
                     K::push_value(key_ctxt, ValueField::from_value(key));
@@ -678,9 +686,9 @@ impl<'v, K, V> MapContext<'v, K, V>
             },
             (Some(kind), Some(key)) => {
                 if kind.as_uncased().starts_with("k") {
-                    return Some(Either::Left(self.ctxt(key, name).0));
+                    return Some(Either::Left(&mut self.ctxt(key, name).0));
                 } else if kind.as_uncased().starts_with("v") {
-                    return Some(Either::Right(self.ctxt(key, name).1));
+                    return Some(Either::Right(&mut self.ctxt(key, name).1));
                 } else {
                     let error = Error::from(&[Cow::Borrowed("k"), Cow::Borrowed("v")])
                         .with_entity(Entity::Index(0))
@@ -717,29 +725,34 @@ impl<'v, K, V> MapContext<'v, K, V>
         }
     }
 
-    fn finalize<T: std::iter::FromIterator<(K, V)>>(self) -> Result<'v, T> {
-        let (keys, values, key_map) = (self.keys, self.values, self.key_map);
-        let errors = std::cell::RefCell::new(self.errors);
+    fn finalize<T: std::iter::FromIterator<(K, V)>>(mut self) -> Result<'v, T> {
+        let map: T = self.entries.into_iter()
+            .zip(self.metadata.iter())
+            .zip(self.table.keys())
+            .filter_map(|(((k_ctxt, v_ctxt), name), idx)| {
+                let key = K::finalize(k_ctxt)
+                    .map_err(|e| {
+                        // FIXME: Fix `NameBuf` to take in `k` and add it.
+                        // FIXME: Perhaps the `k` should come after: `map.0:k`.
+                        let form_key = format!("k:{}", idx);
+                        self.errors.extend(e.with_name((name.parent(), form_key)));
+                    })
+                    .ok();
 
-        let keys = keys.into_iter()
-            .zip(key_map.values().map(|(_, name)| name))
-            .filter_map(|(ctxt, name)| match K::finalize(ctxt) {
-                Ok(value) => Some(value),
-                Err(e) => { errors.borrow_mut().extend(e.with_name(*name)); None },
-            });
+                let val = V::finalize(v_ctxt)
+                    .map_err(|e| self.errors.extend(e.with_name((name.parent(), *idx))))
+                    .ok();
 
-        let values = values.into_iter()
-            .zip(key_map.values().map(|(_, name)| name))
-            .filter_map(|(ctxt, name)| match V::finalize(ctxt) {
-                Ok(value) => Some(value),
-                Err(e) => { errors.borrow_mut().extend(e.with_name(*name)); None },
-            });
+                Some((key?, val?))
+            })
+            .collect();
 
-        let map: T = keys.zip(values).collect();
-        let no_errors = errors.borrow().is_empty();
-        match no_errors {
-            true => Ok(map),
-            false => Err(errors.into_inner())
+        if !self.errors.is_empty() {
+            Err(self.errors)
+        } else if self.opts.strict && self.table.is_empty() {
+            Err(Errors::from(ErrorKind::Missing))
+        } else {
+            Ok(map)
         }
     }
 }
@@ -892,5 +905,26 @@ impl<'v, A: FromForm<'v>, B: FromForm<'v>> FromForm<'v> for (A, B) {
                 Err(ctxt.errors)?
             }
         }
+    }
+}
+
+#[crate::async_trait]
+impl<'v, T: FromForm<'v> + Sync> FromForm<'v> for Arc<T> {
+    type Context = <T as FromForm<'v>>::Context;
+
+    fn init(opts: Options) -> Self::Context {
+        T::init(opts)
+    }
+
+    fn push_value(ctxt: &mut Self::Context, field: ValueField<'v>) {
+        T::push_value(ctxt, field)
+    }
+
+    async fn push_data(ctxt: &mut Self::Context, field: DataField<'v, '_>) {
+        T::push_data(ctxt, field).await
+    }
+
+    fn finalize(this: Self::Context) -> Result<'v, Self> {
+        T::finalize(this).map(Arc::new)
     }
 }

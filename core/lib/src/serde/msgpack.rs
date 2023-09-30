@@ -1,15 +1,15 @@
 //! Automatic MessagePack (de)serialization support.
 //!
-//! See [`MsgPack`](crate::serde::msgpack::MsgPack) for further details.
+//! See [`MsgPack`] for further details.
 //!
 //! # Enabling
 //!
-//! This module is only available when the `json` feature is enabled. Enable it
-//! in `Cargo.toml` as follows:
+//! This module is only available when the `msgpack` feature is enabled. Enable
+//! it in `Cargo.toml` as follows:
 //!
 //! ```toml
 //! [dependencies.rocket]
-//! version = "0.5.0-rc.1"
+//! version = "=0.5.0-rc.3"
 //! features = ["msgpack"]
 //! ```
 //!
@@ -280,7 +280,7 @@ impl<T> DerefMut for MsgPack<T> {
 pub fn from_slice<'a, T>(v: &'a [u8]) -> Result<T, Error>
     where T: Deserialize<'a>,
 {
-    rmp_serde::from_read_ref(v)
+    rmp_serde::from_slice(v)
 }
 
 /// Serialize a `T` into a MessagePack byte vector with compact representation.
